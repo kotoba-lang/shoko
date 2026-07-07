@@ -87,7 +87,7 @@ ledger → swaps to `DatomicStore` with identical results.
 | `src/shoko/governor.cljc` | **ArchiveGovernor** — no-actuation · subject-exists (independent/unconditional) · share-requires-acl (deny-by-default) · tenant-isolation · high-stakes |
 | `src/shoko/phase.cljc` | **Phase 0→3** — ingest-only → assisted → assisted-draft → supervised (sharing always human) |
 | `src/shoko/operation.cljc` | **ArchiveActor** — langgraph StateGraph; ingest vs assess flows |
-| `src/shoko/archiveport.cljc` | **ArchiveTarget** port (`fetch-file`/`propose-revision!`/`share!`) + `mock-archiveport` (deterministic in-memory + injected Distributor fn) |
+| `src/shoko/archiveport.cljc` | **ArchiveTarget** port (`fetch-file`/`propose-revision!`/`share!`) + `mock-archiveport` (default, deterministic in-memory + injected Distributor fn) + `r2-archiveport` (JVM-only, opt-in — real Cloudflare R2 backend over R2's S3-compatible API, SigV4-signed plain HTTP, live-verified) |
 | `src/shoko/cacao.clj` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor key) |
 | `src/shoko/kotoba.clj` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
 | `src/shoko/query.cljc` | pure status lookups (`draft-status`/`shared-with?`/`known-principal?`) for callers that don't want to run the actor |
@@ -126,6 +126,33 @@ default — no network/creds. `share!` hands the already-governed content to
 an injected `:distribute-fn` once per grant. A live notification/email
 client is **not shipped here** — inject your own.
 
+`shoko.archiveport/r2-archiveport` (JVM-only) is a REAL, opt-in
+`ArchiveTarget` backed by a Cloudflare R2 bucket, speaking R2's
+S3-compatible API over plain HTTP with hand-verified SigV4 signing (no AWS
+SDK) — shoko is a plain JVM library, not a Cloudflare Worker, so it can't use
+the R2Bucket binding app-aozora's PDS Worker uses (ADR-2607071000); this is
+the JVM-side equivalent. `fetch-file` = GET object, `share!` = PUT object
+(keyed by `file-id`, EDN-encoded). Mock stays the default everywhere — real
+R2 is only ever used when explicitly constructed and injected:
+
+```clojure
+(require '[shoko.archiveport :as archiveport])
+;; :account-id/:access-key-id/:secret-access-key fall back to env
+;; R2_ACCOUNT_ID/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY when omitted
+;; (see scripts/r2-creds.bb for the env→1Password resolution used to get
+;; real creds into a shell for manual verification — never in code/CI).
+(archiveport/r2-archiveport {:bucket "cloud-itonami-shoko-archive"})
+```
+
+Live-verified (2026-07-07): a real `share!`/`fetch-file` round trip against
+bucket `cloud-itonami-shoko-archive` — 236 bytes PUT, 236 bytes GET back,
+byte-for-byte identical (`java.util.Arrays/equals`), cleaned up after. The
+SigV4 canonicalization is cross-checked function-for-function against
+`kotobase.sigv4-test`'s golden vectors (gftdcojp/net-kotobase clj-edge, the
+proven cljs implementation this JVM port mirrors). The automated suite
+(`test/shoko/archiveport_test.clj`) covers request-building against an
+injected fake `:http-fn` only — no real network/creds in CI.
+
 ```clojure
 ;; actor issues its own key, self-mints CACAO (same pattern as kekkai/teian/koyomi)
 (require '[shoko.kotoba :as k] '[shoko.cacao :as cacao] '[clojure.data.json :as json])
@@ -140,7 +167,8 @@ client is **not shipped here** — inject your own.
          '[shoko.coordllm :as coordllm] '[shoko.archiveport :as archiveport])
 (op/build store
   {:advisor (coordllm/llm-advisor (model/anthropic-model {:api-key … :http-fn … :json-write … :json-read …}))
-   :archiveport (archiveport/mock-archiveport (atom {}) my-real-distribute-fn)})
+   :archiveport (archiveport/r2-archiveport {:bucket "cloud-itonami-shoko-archive"
+                                             :distributor my-real-distribute-fn})})
 ```
 
 An unparseable/hallucinating LLM response falls to confidence 0 / noop, and
@@ -162,10 +190,10 @@ here.
 Full implementation (upgraded from the initial scaffold-only cut). Store is
 `:db-api` driven — `MemStore ≡ DatomicStore(langchain.db) ≡
 kotoba-store(kotobase.net)` on the same contract. CACAO self-issuance is
-offline-verified. `ArchiveTarget`'s real-backend binding is structurally
-complete but **live-untested** — same known state kekkai/teian/koyomi ship
-in; a real Distributor (email/Slack/etc) is not shipped here at all (inject
-your own).
+offline-verified. `ArchiveTarget` has a real, opt-in, **live-verified**
+backend (`r2-archiveport`, Cloudflare R2 via SigV4 — see above); mock stays
+the default. A real Distributor (email/Slack/etc) is still not shipped here
+at all (inject your own) — same known state kekkai/teian/koyomi ship in.
 
 ## References
 
