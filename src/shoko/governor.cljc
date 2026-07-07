@@ -41,11 +41,21 @@
                            a phantom share of nil content that still writes
                            a false :committed ledger fact.
       3. Share-requires-acl (deny-by-default) — the target :principal must
-                           already have SOME grant recorded in shoko's own
-                           grant ledger (on ANY file, not necessarily this
-                           one) — kekkai.acl's deny-by-default mirrored onto
-                           shoko's ACL: an entirely unregistered principal
-                           string is a hard violation, never a soft signal.
+                           already have a grant recorded in shoko's own
+                           grant ledger WITHIN THE SAME TENANT as the file
+                           now being shared (not necessarily this exact
+                           file — a different file in the SAME tenant is
+                           fine, that's legitimate onboarding — but a grant
+                           in an UNRELATED tenant must never vouch for them
+                           here) — kekkai.acl's deny-by-default mirrored
+                           onto shoko's ACL, specific-pair-matching and all:
+                           an entirely unregistered principal string, OR one
+                           known only in a different tenant, is a hard
+                           violation, never a soft signal. (Confirmed bug:
+                           this used to check 'known ANYWHERE in the ledger'
+                           with zero tenant linkage — a principal known only
+                           in tenant A could be granted a tenant-B file with
+                           a false zero-violations verdict.)
       4. Tenant-isolation (recheck) — same store-vs-store check, re-run
                            fresh at share-time (not trusted from draft-time
                            approval) — teian's publish-time-recheck lesson
@@ -103,14 +113,17 @@
 
 (defn- unregistered-principal-violations
   "share-requires-acl (deny-by-default, kekkai.acl analog): the target
-  principal must already have SOME grant recorded — on any file — before a
-  NEW share can be granted to them. An entirely unknown principal string
-  (never vouched for anywhere in the grant ledger) is a hard violation, not
-  a soft escalate."
-  [st principal]
-  (when-not (store/principal-known? st principal)
+  principal must already have a grant recorded WITHIN THE SAME TENANT as
+  the file now being shared, before a NEW share can be granted to them. An
+  entirely unknown principal string, OR one known only via grant(s) in a
+  DIFFERENT tenant, is a hard violation, not a soft escalate — a grant in
+  tenant A must never vouch for a principal being shared a tenant-B file
+  (the confirmed privilege-escalation-shaped bug this scoping closes; see
+  store/principal-known?)."
+  [st principal tenant]
+  (when-not (store/principal-known? st principal tenant)
     [{:rule :unregistered-principal
-      :detail (str "grant台帳に事前記録の無いprincipalへの新規共有: " principal)}]))
+      :detail (str "tenant " tenant " 内でgrant台帳に事前記録の無いprincipalへの新規共有: " principal)}]))
 
 (defn check
   "Censors an archive-LLM proposal for a shoko op. Returns
@@ -132,7 +145,8 @@
                     (concat (missing-file-violations st file-id)
                             (missing-activity-violations st activity-id)
                             (missing-draft-violations st file-id)
-                            (unregistered-principal-violations st (:principal request))
+                            (unregistered-principal-violations
+                             st (:principal request) (:tenant (store/file st file-id)))
                             (tenant-violations st file-id activity-id))
                     [{:rule :unrecognized-op :detail (str "未対応op: " op)}]))
         conf    (:confidence proposal 0.0)

@@ -21,7 +21,8 @@
   (some? (store/grant-of st principal file-id)))
 
 (defn known-principal?
-  "Has `principal` ever received any grant at all (on any file)? — the same
-  deny-by-default check shoko.governor's share-requires-acl invariant uses."
-  [st principal]
-  (store/principal-known? st principal))
+  "Has `principal` received a grant WITHIN `tenant`? — the same tenant-scoped
+  deny-by-default check shoko.governor's share-requires-acl invariant uses
+  (a grant recorded under a different tenant never counts here)."
+  [st principal tenant]
+  (store/principal-known? st principal tenant))

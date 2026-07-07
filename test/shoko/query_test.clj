@@ -20,6 +20,9 @@
 (deftest known-principal?
   (doseq [[label s] (backends)]
     (testing label
-      (is (query/known-principal? s "alice") "pre-seeded via an existing grant")
-      (is (not (query/known-principal? s "mallory-external"))
+      (is (query/known-principal? s "alice" "gftdcojp/cloud-itonami")
+          "pre-seeded via an existing grant WITHIN this tenant")
+      (is (not (query/known-principal? s "alice" "someone-else/other-repo"))
+          "tenant-scoped: alice's grant in a different tenant must not vouch for her here")
+      (is (not (query/known-principal? s "mallory-external" "gftdcojp/cloud-itonami"))
           "deny-by-default: an entirely unregistered principal is unknown"))))

@@ -167,10 +167,16 @@
                 base (pending-record request proposal subj)]
             (if (= :approved (:status approval))
               {:disposition :commit
+               ;; :now is an OPTIONAL request field for deterministic demo/test
+               ;; seeding only (pass an explicit epoch-seconds value to pin
+               ;; :granted-at); a real request normally omits it, so the
+               ;; fallback below must be the actual current time
+               ;; (store/real-now), never the fixed store/demo-now constant —
+               ;; the audit ledger's "when" must be real for a real commit.
                :record (case (:op request)
                          :file/share (update base :value assoc
                                              :granted-by (:by approval)
-                                             :granted-at (:now request store/demo-now))
+                                             :granted-at (:now request (store/real-now)))
                          (update base :value assoc :approved-by (:by approval)))
                :audit [{:t :human-signoff :op (:op request) :subject subj
                         :by (:by approval) :recommendation (:recommendation proposal)}]}

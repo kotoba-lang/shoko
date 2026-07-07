@@ -44,7 +44,7 @@
   (draft-of [s file-id]       "committed/proposed draft for a file, or nil")
   (grant-of [s principal file-id] "the grant for this exact (principal, file) pair, or nil")
   (grants-of-file [s file-id] "every grant recorded against a file")
-  (principal-known? [s principal] "has ANY grant ever been recorded for this principal (on any file)? — the deny-by-default share-requires-acl check (see shoko.governor)")
+  (principal-known? [s principal tenant] "has this principal received a grant on some file WITHIN this tenant? — the deny-by-default share-requires-acl check (see shoko.governor), TENANT-SCOPED: a grant recorded under an unrelated tenant must never vouch for a principal here (a principal known only in tenant A must not be treated as pre-authorized for tenant B — the confirmed privilege-escalation-shaped bug this scoping closes). The tenant a grant 'belongs to' is resolved via the file it was granted against, not stored redundantly on the grant record itself.")
   (ledger [s])
   (record-datom! [s record] "append/merge a shoko ground fact to the SSoT")
   (append-ledger! [s fact]  "append one immutable storage-governance audit fact")
@@ -52,7 +52,21 @@
 
 ;; ───────────────────────── demo data ─────────────────────────
 ;; A fixed clock so grants/tests are deterministic and offline-verifiable.
+;; NEVER used as a runtime commit-time fallback for a real request — that
+;; was a confirmed audit-integrity bug (a REAL :file/share commit missing
+;; :now silently stamped this constant instead of the actual time). Use
+;; ONLY for demo/test seeding and for tests that explicitly want a
+;; deterministic :granted-at (they pass :now demo-now themselves).
 (def demo-now 1751500000) ; ~2026-07-03Z, epoch seconds
+
+(defn real-now
+  "The actual current time, epoch seconds (same unit as demo-now above) —
+  the :granted-at fallback for a REAL :file/share commit whose request
+  omitted :now, so a missing :now never silently stamps the fixed demo
+  clock into the audit ledger (see shoko.operation)."
+  []
+  #?(:clj (quot (System/currentTimeMillis) 1000)
+     :cljs (quot (.getTime (js/Date.)) 1000)))
 
 (defn demo-data
   "cloud-itonami's book: f-handbook and f-contract are clean, known-tenant
@@ -93,7 +107,10 @@
   (draft-of [_ file-id] (get-in @a [:drafts file-id]))
   (grant-of [_ principal file-id] (get-in @a [:grants (model/grant-id principal file-id)]))
   (grants-of-file [_ file-id] (filterv #(= file-id (:file-id %)) (vals (:grants @a))))
-  (principal-known? [_ principal] (boolean (some #(= principal (:principal %)) (vals (:grants @a)))))
+  (principal-known? [s principal tenant]
+    (boolean (some (fn [g] (and (= principal (:principal g))
+                                (= tenant (:tenant (file s (:file-id g))))))
+                   (vals (:grants @a)))))
   (ledger [_] (:ledger @a))
   (record-datom! [s {:keys [kind id value]}]
     (case kind
@@ -154,9 +171,12 @@
   (grants-of-file [this file-id]
     (->> (q* this '[:find [?v ...] :where [?r :grant/id _] [?r :grant/edn ?v]])
          (mapv dec*) (filterv #(= file-id (:file-id %)))))
-  (principal-known? [this principal]
+  (principal-known? [this principal tenant]
     (->> (q* this '[:find [?v ...] :where [?r :grant/id _] [?r :grant/edn ?v]])
-         (mapv dec*) (some #(= principal (:principal %))) boolean))
+         (mapv dec*)
+         (some (fn [g] (and (= principal (:principal g))
+                            (= tenant (:tenant (file this (:file-id g)))))))
+         boolean))
   (ledger [this]
     (->> (q* this '[:find ?s ?f :where [?e :ledger/seq ?s] [?e :ledger/fact ?f]])
          (sort-by first) (mapv (comp dec* second))))

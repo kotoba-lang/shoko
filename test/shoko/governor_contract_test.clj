@@ -8,6 +8,7 @@
             [langgraph.graph :as g]
             [shoko.archiveport :as archiveport]
             [shoko.coordllm :as coordllm]
+            [shoko.model :as model]
             [shoko.store :as store]
             [shoko.operation :as op]))
 
@@ -146,8 +147,9 @@
 
 (deftest share-requires-acl-happy-path-known-principal-new-file
   (testing "alice is already known (a prior grant exists on f-handbook) — she CAN receive a
-            NEW share on a DIFFERENT file (f-contract): share-requires-acl checks she's known
-            ANYWHERE in the ledger, not specifically already-granted on THIS file"
+            NEW share on a DIFFERENT file (f-contract) in the SAME tenant
+            (gftdcojp/cloud-itonami): share-requires-acl checks she's known ANYWHERE
+            WITHIN THIS TENANT in the ledger, not specifically already-granted on THIS file"
     (let [[s actor] (fresh)
           _  (run actor "d3" {:op :file/draft :activity "act-archive" :file "f-contract"} 3)
           r1 (run actor "s3" {:op :file/share :activity "act-archive" :file "f-contract"
@@ -157,6 +159,37 @@
                        {:thread-id "s3" :resume? true})]
         (is (= :commit (get-in r2 [:state :disposition])))
         (is (some? (store/grant-of s "alice" "f-contract")))))))
+
+(deftest share-requires-acl-is-tenant-scoped-cross-tenant-principal-is-held
+  (testing "CONFIRMED BUG regression (privilege-escalation-shaped): alice is known ONLY via a
+            pre-existing grant in tenant A (gftdcojp/cloud-itonami, via f-handbook). A NEW
+            share of a COMPLETELY DIFFERENT file that belongs to tenant B
+            (someone-else/other-repo, f-rogue-tenant) must NOT succeed just because alice is
+            known SOMEWHERE in the ledger. A second activity is registered whose own :repo
+            legitimately matches tenant B, so tenant-isolation itself is clean here and does
+            NOT mask this — isolating the share-requires-acl tenant-scoping bug specifically.
+            Before the fix this reproduced exactly what the reviewer found: gov/check returned
+            zero violations and, after simulated approval, alice received a real ledger-
+            recorded grant for the tenant-B file."
+    (let [[s actor _shared distributed] (fresh)]
+      (store/record-datom! s {:kind :activity :id "act-tenant-b"
+                              :value (model/activity "act-tenant-b" "someone-else/other-repo"
+                                                      "別テナントの依頼")})
+      (let [d1 (run actor "d-tb" {:op :file/draft :activity "act-tenant-b" :file "f-rogue-tenant"} 3)]
+        (is (= :commit (get-in d1 [:state :disposition]))
+            "sanity: the draft itself is clean — tenant-isolation passes because the
+             activity's own :repo matches f-rogue-tenant's :tenant"))
+      (let [res (run actor "s-tb" {:op :file/share :activity "act-tenant-b" :file "f-rogue-tenant"
+                                   :principal "alice"} 3)
+            basis (-> (store/ledger s) last :basis)]
+        (is (not= :interrupted (:status res))
+            "hard violations hold directly, no approval offered — this must NOT reach a human
+             with a clean bill of health")
+        (is (= :hold (get-in res [:state :disposition])))
+        (is (some #{:unregistered-principal} basis)
+            "alice is unknown WITHIN tenant B — her tenant-A grant must not vouch for her here")
+        (is (nil? (store/grant-of s "alice" "f-rogue-tenant")) "no grant was ever fabricated")
+        (is (empty? @distributed) "the distributor was never invoked for a denied cross-tenant share")))))
 
 (deftest share-requires-acl-adversarial-unregistered-principal-is-held
   (testing "mallory-external has NEVER received any grant anywhere — sharing to her is a
@@ -233,3 +266,46 @@
       (is (= :hold (get-in r2 [:state :disposition])))
       (is (nil? (store/grant-of s "alice" "f-contract")) "no grant was created on rejection")
       (is (empty? @distributed)))))
+
+;; ── granted-at audit-integrity: a REAL :file/share commit that omits :now must stamp the
+;;    ACTUAL current time, never silently fall back to the fixed store/demo-now constant ──
+
+(deftest share-commit-granted-at-uses-real-time-not-demo-clock
+  (testing "CONFIRMED BUG regression (audit-integrity): a :file/share request that omits :now
+            (as sim.cljc's own demo driver always does, and as every real caller normally
+            would) must stamp the grant's :granted-at with the ACTUAL current time
+            (store/real-now), never silently with the fixed store/demo-now constant — a
+            demo/test-seeding fixture that must never leak into a real commit path"
+    (let [[s actor] (fresh)
+          _  (run actor "d-rt" {:op :file/draft :activity "act-archive" :file "f-contract"} 3)
+          _  (run actor "s-rt" {:op :file/share :activity "act-archive" :file "f-contract"
+                                :principal "alice"} 3)
+          before (store/real-now)
+          r2 (g/run* actor {:approval {:status :approved :by "admin"}}
+                     {:thread-id "s-rt" :resume? true})
+          after (store/real-now)
+          granted-at (:granted-at (store/grant-of s "alice" "f-contract"))]
+      (is (= :commit (get-in r2 [:state :disposition])))
+      (is (not= store/demo-now granted-at)
+          "must NOT silently stamp the fixed demo-clock constant")
+      (is (<= before granted-at after)
+          "must be the actual current time (epoch seconds), bounded by real-now calls taken
+           immediately before/after the commit"))))
+
+(deftest share-commit-granted-at-honors-explicit-now
+  (testing "a :file/share request that DOES pass an explicit :now (deterministic demo/test
+            seeding, e.g. store/demo-now for reproducible fixtures) gets EXACTLY that value
+            stamped as :granted-at — store/real-now is only the fallback for a real request
+            that omits :now, it never overrides an explicit one"
+    (let [[s actor] (fresh)
+          _  (run actor "d-en" {:op :file/draft :activity "act-archive" :file "f-contract"} 3)
+          r1 (g/run* actor {:request {:op :file/share :activity "act-archive" :file "f-contract"
+                                      :principal "alice" :now store/demo-now}
+                            :context (ctx 3)}
+                     {:thread-id "s-en"})
+          _  (is (= :interrupted (:status r1)))
+          r2 (g/run* actor {:approval {:status :approved :by "admin"}}
+                     {:thread-id "s-en" :resume? true})]
+      (is (= :commit (get-in r2 [:state :disposition])))
+      (is (= store/demo-now (:granted-at (store/grant-of s "alice" "f-contract")))
+          "explicit :now must be used exactly, never overridden by real-now"))))

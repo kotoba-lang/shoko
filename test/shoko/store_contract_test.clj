@@ -21,8 +21,13 @@
       (is (= "hr-onboarding" (:granted-by (store/grant-of s "alice" "f-handbook")))
           "demo data pre-seeds alice as an already-known principal")
       (is (nil? (store/grant-of s "alice" "f-contract")) "no grant yet on a DIFFERENT file")
-      (is (true? (store/principal-known? s "alice")))
-      (is (false? (store/principal-known? s "mallory-external"))
+      (is (true? (store/principal-known? s "alice" "gftdcojp/cloud-itonami"))
+          "alice is known WITHIN the tenant her existing grant (f-handbook) belongs to")
+      (is (false? (store/principal-known? s "alice" "someone-else/other-repo"))
+          "alice's tenant-A grant must NOT vouch for her in an unrelated tenant B —
+           tenant-scoped share-requires-acl (the confirmed privilege-escalation-shaped
+           bug this scoping closes)")
+      (is (false? (store/principal-known? s "mallory-external" "gftdcojp/cloud-itonami"))
           "an entirely unregistered principal is unknown by default"))))
 
 (deftest write-and-ledger-parity
@@ -39,7 +44,8 @@
       (store/record-datom! s {:kind :grant :id (model/grant-id "bob" "f-contract")
                               :value (model/grant "bob" "f-contract" {:granted-by "alice" :granted-at 1})})
       (is (= #{:read} (:access (store/grant-of s "bob" "f-contract"))))
-      (is (true? (store/principal-known? s "bob")))
+      (is (true? (store/principal-known? s "bob" "gftdcojp/cloud-itonami"))
+          "bob's grant is on f-contract, which is in this tenant")
 
       (store/append-ledger! s {:op :a :disposition :record})
       (store/append-ledger! s {:op :b :disposition :commit})
@@ -79,7 +85,7 @@
   (let [s (store/datomic-store)]
     (is (nil? (store/file s "nope")))
     (is (= [] (store/all-files s)))
-    (is (false? (store/principal-known? s "nobody")))
+    (is (false? (store/principal-known? s "nobody" "t/t")))
     (store/record-datom! s {:kind :file :id "x"
                             :value {:drive/id "x" :drive/kind :file :drive/title "t"
                                     :tenant "t/t"}})
