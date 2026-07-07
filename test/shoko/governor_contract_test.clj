@@ -1,0 +1,235 @@
+(ns shoko.governor-contract-test
+  "The propose→draft-only ArchiveGovernor contract as executable tests —
+  shoko's analog of kekkai's governor_contract_test / teian's/koyomi's
+  governor_contract_test. Invariant: the actor never grants access the
+  ArchiveGovernor would reject; drafting never auto-actuates; sharing always
+  routes to a human regardless of phase."
+  (:require [clojure.test :refer [deftest is testing]]
+            [langgraph.graph :as g]
+            [shoko.archiveport :as archiveport]
+            [shoko.coordllm :as coordllm]
+            [shoko.store :as store]
+            [shoko.operation :as op]))
+
+(defn- fresh []
+  (let [s (store/seed-db) shared (atom {}) distributed (atom [])
+        ap (archiveport/mock-archiveport shared #(swap! distributed conj %))]
+    [s (op/build s {:archiveport ap}) shared distributed]))
+
+(defn- ctx [phase] {:phase phase})
+(defn- run [actor tid req phase] (g/run* actor {:request req :context (ctx phase)} {:thread-id tid}))
+
+(deftest ingest-always-records
+  (testing "observe path records a ground fact regardless of phase"
+    (let [[s actor] (fresh)
+          res (run actor "i" {:op :file/register :file "f-memo"
+                              :value {:drive/id "f-memo" :drive/kind :file :drive/title "メモ"
+                                      :tenant "gftdcojp/cloud-itonami"}} 0)]
+      (is (= :record (get-in res [:state :disposition])))
+      (is (= "メモ" (:drive/title (store/file s "f-memo")))))))
+
+(deftest clean-draft-auto-commits-no-human-needed
+  (testing "phase 3: a clean+confident draft is data, not actuation — it commits without interrupting"
+    (let [[s actor] (fresh)
+          res (run actor "d" {:op :file/draft :activity "act-archive" :file "f-handbook"} 3)]
+      (is (not= :interrupted (:status res)) "drafting is not high-stakes when clean")
+      (is (= :commit (get-in res [:state :disposition])))
+      (is (= :proposed (:status (store/draft-of s "f-handbook"))))
+      (is (= "従業員ハンドブック" (:drive/title (:content (store/draft-of s "f-handbook"))))))))
+
+(deftest draft-requires-human-at-phase1
+  (testing "phase 1: drafting is allowed but never auto-commits"
+    (let [[_ actor] (fresh)
+          r1 (run actor "d1" {:op :file/draft :activity "act-archive" :file "f-handbook"} 1)]
+      (is (= :interrupted (:status r1))))))
+
+;; ── no-actuation: a :file/draft proposal's :effect must be :draft, never :share ──
+
+(deftest no-actuation-invariant
+  (testing "a draft proposal that claims it already shared is held"
+    (let [[s _] (fresh)
+          bad-adv (reify coordllm/Advisor
+                    (-advise [_ _ _] {:recommendation :draft
+                                      :content {:drive/id "f-handbook" :drive/kind :file}
+                                      :effect :share :summary "x" :rationale "x"
+                                      :cites [] :redactions [] :confidence 0.9}))
+          actor (op/build s {:advisor bad-adv})
+          res (g/run* actor {:request {:op :file/draft :activity "act-archive" :file "f-handbook"} :context (ctx 3)}
+                      {:thread-id "na"})]
+      (is (not= :interrupted (:status res)) "hard violations hold directly, no approval offered")
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:no-actuation} (-> (store/ledger s) last :basis))))))
+
+;; ── missing-subject: independent, unconditional — fires for BOTH :file/draft and :file/share ──
+
+(deftest missing-file-is-held-on-draft
+  (testing "a draft for a file that was never registered is held"
+    (let [[s actor] (fresh)
+          res (run actor "mf" {:op :file/draft :activity "act-archive" :file "f-hallucinated"} 3)]
+      (is (not= :interrupted (:status res)))
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:missing-file} (-> (store/ledger s) last :basis))))))
+
+(deftest missing-activity-is-held-even-with-a-real-file
+  (testing "a nonexistent activity-id is a hard violation on its own — independent of/prior to
+            tenant-isolation, so a hallucinated activity can never silently no-op its way past it
+            (mirrors koyomi's missing-activity-violations / teian's missing-artifact-violations)"
+    (let [[s actor] (fresh)
+          res (run actor "ma" {:op :file/draft :activity "act-hallucinated" :file "f-handbook"} 3)
+          basis (-> (store/ledger s) last :basis)]
+      (is (not= :interrupted (:status res)) "hard violations hold directly, no approval offered")
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:missing-activity} basis))
+      (is (not (some #{:tenant-mismatch} basis))
+          "tenant-isolation never even runs when the activity doesn't exist — missing-activity
+           is the ONLY violation, proving it's independent/unconditional, not a side-effect of
+           the tenant check failing to find a repo to compare against"))))
+
+(deftest missing-file-is-held-on-share
+  (testing ":file/share for a file that was never registered is held (subject-exists applies to both ops)"
+    (let [[s actor] (fresh)
+          res (run actor "mfs" {:op :file/share :activity "act-archive" :file "f-hallucinated"
+                                :principal "alice"} 3)]
+      (is (not= :interrupted (:status res)))
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:missing-file} (-> (store/ledger s) last :basis))))))
+
+;; ── tenant-isolation: file's own registered :tenant vs the activity's :repo ──
+
+(deftest tenant-isolation-happy-path
+  (testing "a file registered under the SAME tenant as the driving activity commits cleanly"
+    (let [[_ actor] (fresh)
+          res (run actor "ti-ok" {:op :file/draft :activity "act-archive" :file "f-handbook"} 3)]
+      (is (= :commit (get-in res [:state :disposition]))))))
+
+(deftest tenant-isolation-adversarial-hold
+  (testing "a file registered under a DIFFERENT tenant than the driving activity's repo is held"
+    (let [[s actor] (fresh)
+          res (run actor "ti-bad" {:op :file/draft :activity "act-archive" :file "f-rogue-tenant"} 3)]
+      (is (not= :interrupted (:status res)) "hard violations hold directly, no approval offered")
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:tenant-mismatch} (-> (store/ledger s) last :basis))))))
+
+(deftest phase0-disables-assessments
+  (let [[s actor] (fresh)
+        res (run actor "p0" {:op :file/draft :activity "act-archive" :file "f-handbook"} 0)]
+    (is (= :hold (get-in res [:state :disposition])))
+    (is (= :phase-disabled (-> (store/ledger s) last :phase-reason)))))
+
+(deftest unrecognized-op-is-held
+  (testing "fail-closed: an op the governor doesn't recognize is a hard violation, not a silent pass"
+    (let [[s actor] (fresh)
+          res (run actor "uo" {:op :file/teleport :activity "act-archive" :file "f-handbook"} 3)]
+      (is (not= :interrupted (:status res)))
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:unrecognized-op} (-> (store/ledger s) last :basis))))))
+
+;; ── share-requires-acl (deny-by-default): the target principal must already be a
+;;    KNOWN principal in shoko's own grant ledger — an entirely unregistered
+;;    principal is a hard violation, never a soft signal ──
+
+(deftest sharing-always-requires-human-signoff
+  (testing "even a clean share to an ALREADY-known principal never auto-shares — it interrupts"
+    (let [[s actor _shared distributed] (fresh)
+          _  (run actor "d2" {:op :file/draft :activity "act-archive" :file "f-handbook"} 3)
+          r1 (run actor "s2" {:op :file/share :activity "act-archive" :file "f-handbook"
+                              :principal "alice"} 3)]
+      (is (= :interrupted (:status r1)) "sharing is high-stakes → always human")
+      (is (empty? @distributed) "nothing distributed before sign-off")
+      (let [r2 (g/run* actor {:approval {:status :approved :by "admin"}}
+                       {:thread-id "s2" :resume? true})]
+        (is (= :commit (get-in r2 [:state :disposition])))
+        (is (= "admin" (:granted-by (store/grant-of s "alice" "f-handbook")))
+            "the grant was actually (re-)written by THIS run's approval — not merely the
+             pre-seeded demo grant (which was granted-by \"hr-onboarding\")")
+        (is (= 1 (count @distributed)))))))
+
+(deftest share-requires-acl-happy-path-known-principal-new-file
+  (testing "alice is already known (a prior grant exists on f-handbook) — she CAN receive a
+            NEW share on a DIFFERENT file (f-contract): share-requires-acl checks she's known
+            ANYWHERE in the ledger, not specifically already-granted on THIS file"
+    (let [[s actor] (fresh)
+          _  (run actor "d3" {:op :file/draft :activity "act-archive" :file "f-contract"} 3)
+          r1 (run actor "s3" {:op :file/share :activity "act-archive" :file "f-contract"
+                              :principal "alice"} 3)]
+      (is (= :interrupted (:status r1)) "still always human, but not held on share-requires-acl")
+      (let [r2 (g/run* actor {:approval {:status :approved :by "admin"}}
+                       {:thread-id "s3" :resume? true})]
+        (is (= :commit (get-in r2 [:state :disposition])))
+        (is (some? (store/grant-of s "alice" "f-contract")))))))
+
+(deftest share-requires-acl-adversarial-unregistered-principal-is-held
+  (testing "mallory-external has NEVER received any grant anywhere — sharing to her is a
+            HARD violation, held directly, never reaching a human at all (deny-by-default,
+            mirrors kekkai.acl's deny-by-default-violations)"
+    (let [[s actor _shared distributed] (fresh)
+          _   (run actor "d4" {:op :file/draft :activity "act-archive" :file "f-contract"} 3)
+          res (run actor "s4" {:op :file/share :activity "act-archive" :file "f-contract"
+                               :principal "mallory-external"} 3)
+          basis (-> (store/ledger s) last :basis)]
+      (is (not= :interrupted (:status res)) "hard violations hold directly, no approval offered")
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:unregistered-principal} basis))
+      (is (nil? (store/grant-of s "mallory-external" "f-contract")) "no grant was ever fabricated")
+      (is (empty? @distributed) "the distributor was never invoked for a denied share"))))
+
+;; ── missing-draft: :file/share on a file that was never drafted must HOLD, not send a
+;;    phantom nil-content share + write a false :committed ledger fact ──
+
+(deftest share-without-prior-draft-is-held-not-a-phantom-share
+  (testing ":file/share on a REGISTERED file that has no draft yet must HOLD on :missing-draft,
+            not send a phantom nil-content share + write a false :committed ledger fact"
+    (let [[s actor _shared distributed] (fresh)
+          res (run actor "nodraft" {:op :file/share :activity "act-archive" :file "f-contract"
+                                    :principal "alice"} 3)
+          ledger (store/ledger s)]
+      (is (not= :interrupted (:status res)) "hard violations hold directly, no approval offered")
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:missing-draft} (-> ledger last :basis)))
+      (is (nil? (store/grant-of s "alice" "f-contract")) "no grant was ever fabricated")
+      (is (empty? @distributed) "the distributor was never invoked for a phantom share")
+      (is (not-any? #{:committed} (map :t ledger)) "no false :committed ledger fact was written"))))
+
+;; ── TOCTOU: the human approved the ORIGINALLY governed content; a store mutation
+;;    landing WHILE the approval sits in the interrupt must not leak into share! ──
+
+(deftest share-uses-governed-content-not-a-stale-commit-time-store-read
+  (testing "TOCTOU: mutating the stored draft's content WHILE a share approval is pending
+            (e.g. a legitimate concurrent :file/draft revision on the same file) must not
+            let the since-mutated content slip into what actually gets shared — the human
+            approved the ORIGINALLY governed content, so that's what must be sent"
+    (let [[s actor shared distributed] (fresh)
+          _  (run actor "d5" {:op :file/draft :activity "act-archive" :file "f-handbook"} 3)
+          r1 (run actor "s5" {:op :file/share :activity "act-archive" :file "f-handbook"
+                              :principal "alice"} 3)]
+      (is (= :interrupted (:status r1)) "sharing always interrupts for human sign-off")
+      ;; Simulate a concurrent draft mutation landing on the SAME file while this share
+      ;; approval sits in the interrupt queue — swap in different (tampered) content.
+      (let [governed (store/draft-of s "f-handbook")]
+        (store/record-datom! s {:kind :draft :id "f-handbook"
+                                :value {:content (assoc (:content governed)
+                                                        :drive/title "TAMPERED-AFTER-APPROVAL")}}))
+      (is (= "TAMPERED-AFTER-APPROVAL" (:drive/title (:content (store/draft-of s "f-handbook")))))
+      ;; Approve the ORIGINAL (pre-mutation) share request.
+      (let [r2 (g/run* actor {:approval {:status :approved :by "admin"}}
+                       {:thread-id "s5" :resume? true})]
+        (is (= :commit (get-in r2 [:state :disposition])) "approving a clean, already-governed share still commits")
+        (is (= 1 (count @distributed)) "share! ran exactly once")
+        (is (= "従業員ハンドブック" (:drive/title (:content (get @shared "f-handbook"))))
+            "share! used the ORIGINALLY governed content, unaffected by the later mutation")
+        (is (not= "TAMPERED-AFTER-APPROVAL" (:drive/title (:content (get @shared "f-handbook"))))
+            "the since-injected tampered content never appears in what was actually shared")
+        (is (not-any? #(= "TAMPERED-AFTER-APPROVAL" (:drive/title (:content %))) @distributed)
+            "the distributor never received the tampered content either")))))
+
+(deftest reject-signoff-holds
+  (testing "a human rejection records a hold, not a grant"
+    (let [[s actor _shared distributed] (fresh)
+          _  (run actor "d6" {:op :file/draft :activity "act-archive" :file "f-contract"} 3)
+          _  (run actor "s6" {:op :file/share :activity "act-archive" :file "f-contract"
+                              :principal "alice"} 3)
+          r2 (g/run* actor {:approval {:status :rejected :by "admin"}}
+                     {:thread-id "s6" :resume? true})]
+      (is (= :hold (get-in r2 [:state :disposition])))
+      (is (nil? (store/grant-of s "alice" "f-contract")) "no grant was created on rejection")
+      (is (empty? @distributed)))))
