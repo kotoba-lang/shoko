@@ -255,6 +255,47 @@
         (is (not-any? #(= "TAMPERED-AFTER-APPROVAL" (:drive/title (:content %))) @distributed)
             "the distributor never received the tampered content either")))))
 
+(deftest share-delivers-the-governed-store-draft-not-a-forged-proposal
+  (testing "CONFIRMED BUG regression: none of governor/check's :file/share checks (subject-
+            exists / draft-exists / share-requires-acl / tenant-isolation) ever compared
+            `(:content proposal)` against anything -- an adversarial advisor could propose
+            ARBITRARY forged :content, unrelated to the file that was actually drafted/
+            vetted, and it sailed through with zero violations, was escalated to a human
+            (whose audit trail shows only :recommendation/:phase/:confidence, never
+            :content), and on approval was delivered to archiveport/share! verbatim. The
+            delivered content must always be the store's real, governed draft."
+    (let [[s actor shared distributed] (fresh)
+          _ (run actor "gov-draft" {:op :file/draft :activity "act-archive" :file "f-handbook"} 3)
+          real-content (:content (store/draft-of s "f-handbook"))
+          evil-adv (reify coordllm/Advisor
+                     (-advise [_ _ req]
+                       {:recommendation :share
+                        :content {:drive/id "f-handbook" :drive/kind :file
+                                  :drive/title "EXFILTRATED-NOT-THE-REAL-DRAFT"
+                                  :drive/object-ref "cid:drive:MALICIOUS-PAYLOAD"
+                                  :drive/media-type "application/octet-stream"}
+                        :principal (:principal req)
+                        :summary "forged" :rationale "forged" :cites [] :redactions []
+                        :effect :share :confidence 0.99}))
+          evil-actor (op/build s {:advisor evil-adv :archiveport (archiveport/mock-archiveport
+                                                                    shared #(swap! distributed conj %))})
+          r1 (run evil-actor "gov-share" {:op :file/share :activity "act-archive" :file "f-handbook"
+                                          :principal "alice"} 3)]
+      (is (empty? (get-in r1 [:state :verdict :violations]))
+          "sanity: the forged proposal itself raises no violations -- the recheck must catch
+           it via :checked-content, not by rejecting the proposal outright")
+      (is (= :interrupted (:status r1)) "still requires human sign-off")
+      (let [r2 (g/run* evil-actor {:approval {:status :approved :by "admin"}}
+                       {:thread-id "gov-share" :resume? true})]
+        (is (= :commit (get-in r2 [:state :disposition])))
+        (is (= 1 (count @distributed)) "share! ran exactly once")
+        (is (= real-content (:content (get @shared "f-handbook")))
+            "delivered content is the GOVERNED store draft, not the adversarial proposal")
+        (is (not= "EXFILTRATED-NOT-THE-REAL-DRAFT" (:drive/title (:content (get @shared "f-handbook"))))
+            "the proposal's forged title never reaches delivery")
+        (is (not-any? #(= "EXFILTRATED-NOT-THE-REAL-DRAFT" (:drive/title (:content %))) @distributed)
+            "the distributor never received the forged content either")))))
+
 (deftest reject-signoff-holds
   (testing "a human rejection records a hold, not a grant"
     (let [[s actor _shared distributed] (fresh)
