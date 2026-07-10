@@ -22,17 +22,23 @@
     'casual commit'); only a human approval turns it into an access grant.
 
   TOCTOU note (koyomi confirmed-bug-#1 lesson, applied from the start):
-  `commit-effects!`'s `:file/share` branch shares the `proposal` channel's
-  `:content` — the EXACT content ArchiveGovernor/check already vetted for
-  THIS request back at govern-time, before :request-approval's human-in-
-  the-loop interrupt. `proposal` is a langgraph checkpointed state channel,
-  so it survives the interrupt unchanged; it is NEVER re-read fresh from
-  `store/draft-of` at commit time. A fresh re-read here would be a TOCTOU:
-  if the stored draft were mutated while the approval sat in the interrupt
-  (e.g. a legitimate concurrent `:file/draft` revision landing on the same
-  file), a re-read would share whatever is CURRENTLY in the store — content
-  that was never re-governed for this approval. See
-  governor_contract_test's share-time TOCTOU test."
+  `commit-effects!`'s `:file/share` branch shares `verdict`'s
+  `:checked-content` — the EXACT content ArchiveGovernor/check already
+  vetted for THIS request back at govern-time, before :request-approval's
+  human-in-the-loop interrupt. `verdict` is a langgraph checkpointed state
+  channel, so it survives the interrupt unchanged; it is NEVER re-read fresh
+  from `store/draft-of` at commit time. A fresh re-read here would be a
+  TOCTOU: if the stored draft were mutated while the approval sat in the
+  interrupt (e.g. a legitimate concurrent `:file/draft` revision landing on
+  the same file), a re-read would share whatever is CURRENTLY in the store —
+  content that was never re-governed for this approval. See
+  governor_contract_test's share-time TOCTOU test.
+
+  This branch must NOT use `proposal`'s :content: governor/check never
+  validates the proposal's content against anything (see governor.cljc),
+  so an adversarial/forged proposal's content must never reach
+  archiveport/share! — only the governed `:checked-content` may (confirmed
+  bug this closes)."
   (:require [langgraph.graph :as g]
             [langgraph.checkpoint :as cp]
             [shoko.archiveport :as archiveport]
@@ -80,22 +86,23 @@
   `:file/draft` reads its content from `record` (the commit about to be
   written) — the store doesn't have it yet at this point anyway.
 
-  `:file/share` reads content from `proposal`, NEVER from a fresh
-  `store/draft-of` re-read — see the TOCTOU note in this namespace's
-  docstring. `record`'s :value for :file/share is a shoko.model/grant (no
-  :content field — grants stay a clean ACL shape), so the content to
-  actually deliver comes from the checkpointed `proposal` channel instead.
+  `:file/share` reads content from `verdict`'s `:checked-content`, NEVER
+  from `proposal` and NEVER from a fresh `store/draft-of` re-read — see the
+  TOCTOU note in this namespace's docstring. `record`'s :value for
+  :file/share is a shoko.model/grant (no :content field — grants stay a
+  clean ACL shape), so the content to actually deliver comes from the
+  checkpointed `verdict` channel instead.
 
   Returns a map of extra store facts to merge in on success (currently just
   `:file/draft`'s returned :branch), or nil."
-  [archiveport store {:keys [op file principal]} record proposal]
+  [archiveport store {:keys [op file principal]} record verdict]
   (case op
     :file/draft
     (let [f (store/file store file)
           {:keys [branch]} (archiveport/propose-revision! archiveport f (get-in record [:value :content]))]
       (when branch {:kind :draft :id file :value {:branch branch}}))
     :file/share
-    (do (archiveport/share! archiveport file principal (:content proposal))
+    (do (archiveport/share! archiveport file principal (:checked-content verdict))
         nil)
     nil))
 
@@ -187,8 +194,8 @@
       ;; op-specific EXTERNAL effect FIRST, then the record + ledger — a
       ;; thrown effect leaves no trace of a share that never actually happened.
       (g/add-node :commit
-        (fn [{:keys [request record proposal]}]
-          (let [extra (commit-effects! archiveport store request record proposal)]
+        (fn [{:keys [request record verdict]}]
+          (let [extra (commit-effects! archiveport store request record verdict)]
             (store/record-datom! store record)
             (when extra (store/record-datom! store extra))
             (let [f {:t :committed :op (:op request) :subject (subject request)

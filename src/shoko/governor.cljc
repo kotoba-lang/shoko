@@ -67,14 +67,24 @@
     Confidence floor → escalate.
     `:file/share` is high-stakes → ALWAYS human, independent of phase.
 
+  Content governance (confirmed bug this closes): none of the checks above
+  ever compared `(:content proposal)` against anything — an adversarial
+  advisor could propose ARBITRARY forged `:content` for `:file/share`
+  (unrelated to the file that was actually drafted/vetted) and it sailed
+  through with zero violations, since the checks only cover existence/ACL/
+  tenant facts, never the content substance itself. `check` now returns
+  `:checked-content` — the file's real, freshly-read `store/draft-of`
+  `:content` — which the caller MUST deliver instead of `proposal`'s (see
+  shoko.operation).
+
   Note on TOCTOU: this governor's checks are all fresh store reads run
   BEFORE any human-approval interrupt (govern always runs ahead of
   :request-approval in shoko.operation's StateGraph) — that is what makes
   the share-time recheck meaningful. The separate TOCTOU concern (a stored
   draft mutating WHILE a share approval sits in the interrupt) is guarded
   downstream, in shoko.operation/commit-effects!, by using the CHECKPOINTED
-  `proposal` content captured at THIS governed moment, never a fresh
-  post-approval store re-read (see shoko.operation docstring)."
+  `verdict` channel's `:checked-content` captured at THIS governed moment,
+  never a fresh post-approval store re-read (see shoko.operation docstring)."
   (:require [shoko.store :as store]))
 
 (def confidence-floor 0.6)
@@ -127,14 +137,23 @@
 
 (defn check
   "Censors an archive-LLM proposal for a shoko op. Returns
-   {:ok? :violations :confidence :hard? :escalate? :high-stakes?}.
+   {:ok? :violations :confidence :hard? :escalate? :high-stakes?
+    :checked-content}.
 
    Hard violations force HOLD and cannot be overridden. Granting access
-   (`:file/share`) is high-stakes → human sign-off even when clean."
+   (`:file/share`) is high-stakes → human sign-off even when clean.
+
+   `:checked-content` is the file's real content for :file/share (the
+   store's `draft-of`, fetched fresh here) -- nil for other ops. The caller
+   MUST deliver this value, not `proposal`'s :content: none of the checks
+   above validate the proposal's content against anything, so an
+   adversarial/forged `(:content proposal)` would otherwise sail through
+   with zero violations (see governor.cljc's namespace docstring)."
   [request proposal st]
   (let [op         (:op request)
         file-id    (:file request)
         activity-id (:activity request)
+        current (when (= :file/share op) (:content (store/draft-of st file-id)))
         hard (vec (case op
                     :file/draft
                     (concat (missing-file-violations st file-id)
@@ -153,12 +172,13 @@
         low?    (< conf confidence-floor)
         stakes? (= :file/share op)
         hard?   (boolean (seq hard))]
-    {:ok?          (and (not hard?) (not low?) (not stakes?))
-     :violations   hard
-     :confidence   conf
-     :hard?        hard?
-     :escalate?    (and (not hard?) (or low? stakes?))
-     :high-stakes? stakes?}))
+    {:ok?             (and (not hard?) (not low?) (not stakes?))
+     :violations      hard
+     :confidence      conf
+     :hard?           hard?
+     :escalate?       (and (not hard?) (or low? stakes?))
+     :high-stakes?    stakes?
+     :checked-content current}))
 
 (defn hold-fact [request verdict]
   {:t :shoko-hold :op (:op request) :subject (:file request)
