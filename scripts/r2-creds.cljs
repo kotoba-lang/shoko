@@ -1,12 +1,36 @@
-#!/usr/bin/env bb
-;; r2-creds.bb — Cloudflare R2 S3-compatible credentials (Access Key ID /
+#!/usr/bin/env nbb
+;; --- nbb shims (auto, ADR-2607173000) ---------------------------------
+(def ^:private __fs (js/require "node:fs"))
+(def ^:private __path (js/require "node:path"))
+(def ^:private __cp (js/require "node:child_process"))
+(def ^:private __os (js/require "node:os"))
+(def ^:private __crypto (js/require "node:crypto"))
+(defn- __sh [& args]
+  (let [opts (when (map? (last args)) (last args))
+        cmd (if opts (butlast args) args)
+        r (.spawnSync __cp (first cmd) (to-array (rest cmd))
+                      (clj->js (merge {:encoding "utf8"} (when opts {:cwd (:dir opts)}))))]
+    {:exit (or (.-status r) 1) :out (or (.-stdout r) "") :err (or (.-stderr r) "")}))
+(defn- __shell [& args]
+  (let [opts (when (map? (first args)) (first args))
+        cmd (if opts (rest args) args)
+        r (.spawnSync __cp (first cmd) (to-array (rest cmd))
+                      (clj->js (merge {:stdio "inherit" :encoding "utf8"}
+                                      (when opts {:cwd (:dir opts)}))))]
+    (when-not (zero? (or (.-status r) 1))
+      (throw (js/Error. (str "shell failed: " (pr-str cmd)))))
+    {:exit (or (.-status r) 0) :out "" :err ""}))
+;; -----------------------------------------------------------------------
+(defn- __json-parse [s & _] (js->clj (js/JSON.parse s) :keywordize-keys true))
+(defn- __json-gen [x & _] (js/JSON.stringify (clj->js x)))
+;; r2-creds.nbb — Cloudflare R2 S3-compatible credentials (Access Key ID /
 ;; Secret Access Key / Account ID) を解決して出力する。shoko.archiveport/
 ;; r2-archiveport の手動 live 検証専用（自動テスト `clojure -M:dev:test` は
 ;; injected fake :http-fn のみを使い、real credentials/network を一切
 ;; 必要としない — see test/shoko/archiveport_test.clj）。
 ;;
 ;; 解決順は下記 :order（既定 env→1Password）。cloud-itonami/scripts/
-;; mail-creds.bb と同じ形: 参照先（op:// パス）は秘密ではないのでこの
+;; mail-creds.nbb と同じ形: 参照先（op:// パス）は秘密ではないのでこの
 ;; ファイルに置く。実値は解決時のみ取得し、リポジトリには一切置かない。
 ;;
 ;; この gftd-r2/* の組は 2026-07-07 に実際の R2 バケット（S3 API 経由の
@@ -16,12 +40,12 @@
 ;; 済みなのは gftd-r2/* だけ）。
 ;;
 ;; 出力:
-;;   bb scripts/r2-creds.bb            ; shell 用 export 行（eval して使う）
-;;   bb scripts/r2-creds.bb --json     ; {"R2_ACCESS_KEY_ID":...,...}
-;;   eval "$(bb scripts/r2-creds.bb)"  ; 環境に流し込む
+;;   nbb scripts/r2-creds.nbb            ; shell 用 export 行（eval して使う）
+;;   nbb scripts/r2-creds.nbb --json     ; {"R2_ACCESS_KEY_ID":...,...}
+;;   eval "$(nbb scripts/r2-creds.bb)"  ; 環境に流し込む
 (require '[clojure.string :as str]
-         '[clojure.java.shell :refer [sh]]
-         '[cheshire.core :as json])
+         ']
+         ')
 
 (def secrets
   {"R2_ACCESS_KEY_ID"
@@ -42,7 +66,7 @@
 
 (defn from-1password [cfg]
   (when-let [ref (get cfg :1password)]
-    (let [{:keys [exit out]} (sh "op" "read" ref)]
+    (let [{:keys [exit out]} (__sh "op" "read" ref)]
       (when (zero? exit) (str/trim out)))))
 
 (defn resolve-secret [{:keys [order] :as cfg}]
@@ -62,8 +86,8 @@
     (binding [*out* *err*]
       (println (str "r2-creds: 解決できない項目: " (str/join ", " missing)
                     " (op に signin 済みか確認: `op whoami`)")))
-    (System/exit 1))
+    (.exit js/process 1))
   (if json?
-    (println (json/generate-string vals))
+    (println (__json-gen vals))
     (doseq [[k v] vals]
       (println (str "export " k "='" (str/replace v "'" "'\\''") "'")))))
