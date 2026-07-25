@@ -23,20 +23,21 @@
   the R2Bucket binding app-aozora's PDS Worker uses (ADR-2607071000,
   `.put`/`.get` on an injected binding) — it must speak R2's S3-compatible
   API over plain HTTP instead, which means signing every request with AWS
-  SigV4. `kotobase.sigv4` (gftdcojp/net-kotobase clj-edge) already has a
-  proven SigV4 canonicalization for this exact account (B2 + R2 both speak
-  S3), but it's ClojureScript-only (`js/encodeURIComponent` et al) and thus
-  not `require`-able from the JVM host. The functions below are a faithful
-  JVM port of that same algorithm (same function names/shapes, cross-
-  checked against `kotobase.sigv4-test`'s golden vectors in
-  archiveport_test.clj) plus the HMAC signing-key chain kotobase.sigv4
-  deliberately leaves to the host's crypto (there: `crypto.subtle`; here:
-  `javax.crypto.Mac`/`java.security.MessageDigest`, JDK-builtin — no AWS
-  SDK, no extra deps). Kept JVM-only (`#?(:clj ...)`) rather than forced
-  portable: shoko has no cljs/kototama build target today (deps.edn has no
-  shadow-cljs; cli.clj/cacao.clj are already .clj-only) and Web Crypto's
-  async API can't be ported synchronously anyway — same pragmatic call
-  CLAUDE.md documents for kotoba-lang/ed25519 et al."
+  SigV4. That signing is `kotoba-lang/sigv4` (ADR-2607254100).
+
+  This file used to carry a function-for-function JVM port of
+  `kotobase.sigv4`, written because that one was ClojureScript-only
+  (`js/encodeURIComponent` et al) and so not `require`-able from a JVM host.
+  The shared library is portable `.cljc` with crypto injected through a
+  protocol — `javax.crypto` here, WebCrypto in a Worker — so the reason for
+  the port is gone, and with it the port's obligation to stay in step with an
+  original it could not see. What remains below is R2's own request shape,
+  which is genuinely this repo's: an endpoint host rather than a URL,
+  `Authorization` capitalised for `jvm-http-fn`, and byte[] payloads.
+
+  Still JVM-only (`#?(:clj ...)`): shoko has no cljs/kototama build target
+  today (deps.edn has no shadow-cljs; cli.clj/cacao.clj are already
+  .clj-only)."
   ;; clojure.string/clojure.edn are used ONLY inside the #?(:clj ...) R2/SigV4
   ;; section below (see docstring above) — under a :cljs reading that whole
   ;; section vanishes, so clj-kondo's cljs-side pass would otherwise flag
@@ -45,7 +46,9 @@
   ;; rejects outright) — ^:clj-kondo/ignore is the correct scoped escape
   ;; hatch for a require that's genuinely host-specific by design.
   (:require ^:clj-kondo/ignore [clojure.string :as str]
-            ^:clj-kondo/ignore [clojure.edn :as edn]))
+            ^:clj-kondo/ignore [clojure.edn :as edn]
+            ^:clj-kondo/ignore [sigv4.crypto :as sigv4-crypto]
+            ^:clj-kondo/ignore [sigv4.request :as sigv4]))
 
 (defprotocol ArchiveTarget
   (fetch-file [ap file-id] "the file's most recently shared content, or nil")
@@ -83,116 +86,26 @@
          (swap! shared assoc file-id rec)
          rec)))))
 
-;; ───────────────────────── R2 SigV4 (JVM-only, real opt-in) ─────────────────────────
-;; Pure canonicalization, ported function-for-function from kotobase.sigv4
-;; (cljs) — see the ns docstring. Cross-checked against the exact same
-;; golden vectors as kotobase.sigv4-test in archiveport_test.clj.
+
+;; ───────────────────────── R2 SigV4 (JVM-only, real opt-in) ─────────────────
+;;
+;; The signer is kotoba-lang/sigv4 (ADR-2607254100). This file used to carry a
+;; function-for-function JVM port of kotobase.sigv4, written because that one
+;; was ClojureScript-only (`js/encodeURIComponent` et al) and so not
+;; require-able from a JVM host. The shared library is portable `.cljc` with
+;; crypto injected through a protocol, which removes exactly that obstacle —
+;; and removes the port's obligation to stay in step with an original it could
+;; not see.
+;;
+;; What stays here is R2's own shape: an endpoint *host* rather than a URL,
+;; `Authorization` capitalised the way this repo's http-fn expects, byte[]
+;; payloads, and a java.time.Instant clock.
 
 #?(:clj
-(defn s3-encode
-  "URI-encode `s` the way AWS SigV4/S3 requires: percent-encode every UTF-8
-  byte except the unreserved set A-Z a-z 0-9 - _ . ~ (RFC 3986 §2.3). Working
-  byte-wise (not via java.net.URLEncoder, which is form/x-www-urlencoded —
-  wrong alphabet, e.g. space -> '+') is what makes this correct without the
-  `!'()*` manual fixups kotobase.sigv4's `js/encodeURIComponent`-based
-  version needs."
-  [^String s]
-  (let [unreserved? (fn [b] (or (<= (int \A) b (int \Z)) (<= (int \a) b (int \z))
-                                (<= (int \0) b (int \9))
-                                (contains? #{(int \-) (int \_) (int \.) (int \~)} b)))
-        sb (StringBuilder.)]
-    (doseq [signed-b (.getBytes s "UTF-8")]
-      (let [b (bit-and (int signed-b) 0xff)]
-        (if (unreserved? b)
-          (.append sb (char b))
-          (.append sb (format "%%%02X" b)))))
-    (.toString sb))))
-
-#?(:clj
-(defn s3-path
-  "→ \"/<bucket>/<key/segments>\", each segment independently s3-encoded
-  (slashes in `key` stay literal path separators, per S3 canonical-URI
-  rules)."
-  [bucket key]
-  (str "/" (s3-encode bucket) "/" (str/join "/" (map s3-encode (str/split key #"/" -1))))))
-
-#?(:clj
-(defn canonical-query
-  "`params` (a plain map, string/keyword keys) → sorted `k=v&…`, S3-encoded."
-  [params]
-  (->> params
-       (sort-by (comp name key))
-       (map (fn [[k v]] (str (s3-encode (name k)) "=" (s3-encode (str v)))))
-       (str/join "&"))))
-
-#?(:clj
-(defn amz-date
-  "An ISO-8601 instant string (NO fractional seconds, or exactly 3 digits —
-  callers here always produce whole-second instants, see `sign-request`) →
-  {:long \"yyyyMMdd'T'HHmmss'Z'\" :short \"yyyyMMdd\"}. Same regex kotobase.
-  sigv4's `amz-date` uses (`[:-]|\\.\\d{3}` stripped)."
-  [iso]
-  (let [long-str (str/replace iso #"[:-]|\.\d{3}" "")]
-    {:long long-str :short (subs long-str 0 8)})))
-
-#?(:clj
-(defn canonical-request
-  "→ {:canonical str :signed-headers str}. `headers` is a map whose keys are
-  already-lowercased header names (as `sign-request` builds them)."
-  [method path qs headers payload-hash]
-  (let [hks (sort (keys headers))
-        signed-headers (str/join ";" hks)
-        canonical-headers (str/join "" (map (fn [h] (str h ":" (get headers h) "\n")) hks))
-        canonical (str/join "\n" [(str/upper-case (name method)) path qs canonical-headers
-                                  signed-headers payload-hash])]
-    {:canonical canonical :signed-headers signed-headers})))
-
-#?(:clj
-(defn credential-scope [short-date region] (str short-date "/" region "/s3/aws4_request")))
-
-#?(:clj
-(defn string-to-sign [long-date scope canonical-request-hash]
-  (str/join "\n" ["AWS4-HMAC-SHA256" long-date scope canonical-request-hash])))
-
-#?(:clj
-(defn authorization-header [key-id scope signed-headers sig]
-  (str "AWS4-HMAC-SHA256 Credential=" key-id "/" scope
-       ", SignedHeaders=" signed-headers ", Signature=" sig)))
-
-;; ── JDK crypto (HMAC chain kotobase.sigv4 leaves to crypto.subtle) ──────────
+(def ^:private signer-crypto (sigv4-crypto/crypto)))
 
 #?(:clj
 (defn- utf8-bytes ^bytes [^String s] (.getBytes s "UTF-8")))
-
-#?(:clj
-(defn- hex-str [^bytes bs]
-  (let [sb (StringBuilder.)]
-    (doseq [b bs] (.append sb (format "%02x" (bit-and (int b) 0xff))))
-    (.toString sb))))
-
-#?(:clj
-(defn sha256-hex
-  "Lowercase hex SHA-256 digest of `bs` (a byte[]) — the `x-amz-content-
-  sha256` / canonical-request payload hash."
-  [^bytes bs]
-  (hex-str (.digest (java.security.MessageDigest/getInstance "SHA-256") bs))))
-
-#?(:clj
-(defn- hmac-sha256 ^bytes [^bytes key-bytes ^bytes data]
-  (let [mac (javax.crypto.Mac/getInstance "HmacSHA256")]
-    (.init mac (javax.crypto.spec.SecretKeySpec. key-bytes "HmacSHA256"))
-    (.doFinal mac data))))
-
-#?(:clj
-(defn- signing-key
-  "The SigV4 derived signing key: HMAC chain secret -> date -> region ->
-  service -> \"aws4_request\" (AWS SigV4 spec, unabbreviated — the standard
-  4-step derivation, nothing approximated)."
-  ^bytes [secret-access-key short-date region service]
-  (-> (hmac-sha256 (utf8-bytes (str "AWS4" secret-access-key)) (utf8-bytes short-date))
-      (hmac-sha256 (utf8-bytes region))
-      (hmac-sha256 (utf8-bytes service))
-      (hmac-sha256 (utf8-bytes "aws4_request")))))
 
 #?(:clj
 (defn sign-request
@@ -205,30 +118,30 @@
   :secret-access-key, :region (default \"auto\" — R2's SigV4 signing region,
   confirmed against a live bucket), :endpoint-host (e.g. \"<account-id>.r2.
   cloudflarestorage.com\"), :now (java.time.Instant, default now — truncated
-  to whole seconds so `amz-date`'s fractional-seconds regex never sees more
-  than kotobase.sigv4's assumed 3 digits)."
+  to whole seconds)."
   [{:keys [method bucket key query headers payload access-key-id secret-access-key
            region endpoint-host now]
     :or {region "auto" query {} headers {} payload (byte-array 0)
          now (java.time.Instant/now)}}]
-  (let [now-iso (-> now (.truncatedTo java.time.temporal.ChronoUnit/SECONDS) .toString)
-        {:keys [long short]} (amz-date now-iso)
-        payload-hash (sha256-hex payload)
-        path (s3-path bucket key)
-        qs (canonical-query query)
-        signing-headers (assoc headers
-                                "host" endpoint-host
-                                "x-amz-content-sha256" payload-hash
-                                "x-amz-date" long)
-        {:keys [canonical signed-headers]} (canonical-request method path qs signing-headers payload-hash)
-        cr-hash (sha256-hex (utf8-bytes canonical))
-        scope (credential-scope short region)
-        sts (string-to-sign long scope cr-hash)
-        sig (hex-str (hmac-sha256 (signing-key secret-access-key short region "s3") (utf8-bytes sts)))
-        auth (authorization-header access-key-id scope signed-headers sig)]
-    {:url (str "https://" endpoint-host path (when (seq qs) (str "?" qs)))
+  (let [signed (sigv4/signed signer-crypto
+                             {:endpoint (str "https://" endpoint-host)
+                              :bucket bucket
+                              :key key
+                              :region region
+                              :access-key access-key-id
+                              :secret-key secret-access-key
+                              :method method
+                              :query query
+                              :headers headers
+                              :body payload
+                              :now (-> now
+                                       (.truncatedTo java.time.temporal.ChronoUnit/SECONDS)
+                                       .toString)})
+        h (:headers signed)]
+    {:url (:url signed)
      :method method
-     :headers (assoc signing-headers "Authorization" auth)
+     ;; this repo's jvm-http-fn expects the capitalised name
+     :headers (-> h (dissoc "authorization") (assoc "Authorization" (get h "authorization")))
      :body payload})))
 
 ;; ── HTTP transport (same {:url :method :headers :body} -> {:status :body}

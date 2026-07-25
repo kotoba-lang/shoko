@@ -1,9 +1,10 @@
 (ns shoko.archiveport-test
   "r2-archiveport — the real, opt-in Cloudflare R2 ArchiveTarget. Two layers:
 
-  1. SigV4 canonicalization golden vectors, identical to kotobase.sigv4-test
-     (gftdcojp/net-kotobase clj-edge) — locks the JVM port to the exact same
-     proven string format the ClojureScript original signs, byte for byte.
+  1. SigV4: that `sign-request` feeds kotoba-lang/sigv4 R2's request shape,
+     and that what comes back round-trips through the same library's
+     verifier — the independent recomputation R2 itself performs. The
+     canonicalization golden vectors moved to that library with the code.
   2. r2-archiveport request-building against an INJECTED FAKE :http-fn (a
      plain closure capturing the request map, same convention
      cloudflare.client-test / cloud_itonami.mail-test use) — proves share!/
@@ -14,56 +15,88 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [shoko.archiveport :as ap]))
+            [shoko.archiveport :as ap]
+            [sigv4.core :as sigv4-core]
+            [sigv4.crypto :as sigv4-crypto]
+            [sigv4.verify :as sigv4-verify]))
 
-;; ───────────────────────── SigV4 golden vectors (kotobase.sigv4-test parity) ─────────────────────────
 
-(deftest s3-encoding
-  (is (= "a%20b" (ap/s3-encode "a b")))
-  (is (= "a%2Ab" (ap/s3-encode "a*b")) "* -> %2A (S3 extra-encode)")
-  (is (= "a%21b" (ap/s3-encode "a!b")))
-  (is (= "%28x%29" (ap/s3-encode "(x)")))
-  (testing "s3-path encodes bucket + each key segment, keeps slashes"
-    (is (= "/my-bucket/pins/did%3Akey/abc.json"
-           (ap/s3-path "my-bucket" "pins/did:key/abc.json")))))
+;; ───────────────────────── SigV4 ─────────────────────────
+;;
+;; The canonicalization golden vectors that used to live here moved with the
+;; code, to kotoba-lang/sigv4 (ADR-2607254100), where they are pinned against
+;; AWS's own published reference signatures rather than against a sibling
+;; implementation. Two cases this repo exercised that the library did not —
+;; a colon in a key segment, and keyword-keyed query maps — went with them.
+;;
+;; What is tested here is what shoko still owns: that `sign-request` feeds the
+;; library R2's shape correctly, and that the result is one a real endpoint
+;; would accept. The round-trip through `sigv4.verify` is the independent
+;; recomputation R2 performs, so a wrong header set fails here rather than as
+;; an opaque 403 against a live bucket.
 
-(deftest query-canonicalization
-  (is (= "" (ap/canonical-query {})))
-  (testing "sorted by key, S3-encoded"
-    (is (= "list-type=2&prefix=a%2Fb"
-           (ap/canonical-query {:prefix "a/b" :list-type "2"})))))
+(def ^:private signer-opts
+  {:bucket "shoko-archive"
+   :access-key-id "r2accesskeyid"
+   :secret-access-key "r2secretaccesskey"
+   :endpoint-host "acct123.r2.cloudflarestorage.com"
+   :now (java.time.Instant/parse "2026-01-02T03:04:05.678Z")})
 
-(deftest dates
-  (let [d (ap/amz-date "2026-01-02T03:04:05.678Z")]
-    (is (= "20260102T030405Z" (:long d)))
-    (is (= "20260102" (:short d)))))
+(defn- verifies?
+  "Recompute the signature the way R2 would."
+  [signed key method]
+  (let [headers (into {} (map (fn [[k v]] [(clojure.string/lower-case k) v])) (:headers signed))
+        parsed (sigv4-verify/parse-authorization (get headers "authorization"))]
+    (sigv4-verify/constant-time-eq?
+     (:signature parsed)
+     (sigv4-verify/expected-signature
+      (sigv4-crypto/crypto)
+      {:secret-key (:secret-access-key signer-opts)
+       :parsed parsed
+       :amz-date (get headers "x-amz-date")
+       :payload-hash (get headers "x-amz-content-sha256")
+       :request {:method method
+                 :path (sigv4-core/object-path (:bucket signer-opts) key)
+                 :query nil
+                 :headers headers}}))))
 
-(deftest canonical-and-string-to-sign
-  (let [headers {"host" "s3.us-west.backblazeb2.com"
-                 "x-amz-content-sha256" "abc123"
-                 "x-amz-date" "20260102T030405Z"}
-        cr (ap/canonical-request "GET" "/bucket/key" "" headers "abc123")]
-    (is (= "host;x-amz-content-sha256;x-amz-date" (:signed-headers cr)))
-    (is (= (str "GET\n/bucket/key\n\n"
-                "host:s3.us-west.backblazeb2.com\n"
-                "x-amz-content-sha256:abc123\n"
-                "x-amz-date:20260102T030405Z\n\n"
-                "host;x-amz-content-sha256;x-amz-date\n"
-                "abc123")
-           (:canonical cr))))
-  (is (= "20260102/us-west/s3/aws4_request" (ap/credential-scope "20260102" "us-west")))
-  (is (= "AWS4-HMAC-SHA256\n20260102T030405Z\n20260102/us-west/s3/aws4_request\nHASH"
-         (ap/string-to-sign "20260102T030405Z" "20260102/us-west/s3/aws4_request" "HASH")))
-  (is (= (str "AWS4-HMAC-SHA256 Credential=KID/20260102/us-west/s3/aws4_request, "
-              "SignedHeaders=host;x-amz-date, Signature=DEAD")
-         (ap/authorization-header "KID" "20260102/us-west/s3/aws4_request" "host;x-amz-date" "DEAD"))))
+(deftest sign-request-signs-what-r2-will-verify
+  (testing "a GET with no payload"
+    (let [key "pins/did:key/abc.json"
+          signed (ap/sign-request (assoc signer-opts :method :get :key key))]
+      (is (= (str "https://acct123.r2.cloudflarestorage.com"
+                  "/shoko-archive/pins/did%3Akey/abc.json")
+             (:url signed))
+          "colons in a key segment are percent-encoded; slashes are not")
+      (is (= "20260102T030405Z" (get (:headers signed) "x-amz-date"))
+          "the injected Instant is truncated to whole seconds")
+      (is (= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+             (get (:headers signed) "x-amz-content-sha256"))
+          "SHA-256 of the empty payload")
+      (is (verifies? signed key :get))))
+  (testing "a PUT with bytes"
+    (let [key "files/report.pdf"
+          signed (ap/sign-request (assoc signer-opts :method :put :key key
+                                         :payload (.getBytes "hello" "UTF-8")))]
+      (is (= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+             (get (:headers signed) "x-amz-content-sha256")))
+      (is (verifies? signed key :put)))))
 
-(deftest sha256-hex-known-vectors
-  (is (= "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-         (ap/sha256-hex (byte-array 0)))
-      "SHA-256 of the empty string — the well-known vector, and R2 GET's payload hash")
-  (is (= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-         (ap/sha256-hex (.getBytes "hello" "UTF-8")))))
+(deftest sign-request-keeps-r2-request-conventions
+  (let [signed (ap/sign-request (assoc signer-opts :method :get :key "a.json"))]
+    (testing "jvm-http-fn expects the capitalised header name"
+      (is (contains? (:headers signed) "Authorization"))
+      (is (not (contains? (:headers signed) "authorization"))))
+    (is (= :get (:method signed)) "the method stays a keyword for the http-fn")
+    (is (str/starts-with? (get (:headers signed) "Authorization")
+                          "AWS4-HMAC-SHA256 Credential=r2accesskeyid/20260102/auto/s3/aws4_request,")
+        "R2 signs under region \"auto\"")))
+
+(deftest sign-request-signs-query-parameters
+  (let [signed (ap/sign-request (assoc signer-opts :method :get :key nil
+                                       :query {:prefix "a/b" :list-type "2"}))]
+    (is (str/ends-with? (:url signed) "/shoko-archive?list-type=2&prefix=a%2Fb")
+        "keyword query keys, sorted and S3-encoded")))
 
 ;; ───────────────────────── sign-request shape ─────────────────────────
 
@@ -79,7 +112,7 @@
            (:url req)))
     (is (= :put (:method req)))
     (is (= "acct123.r2.cloudflarestorage.com" (get-in req [:headers "host"])))
-    (is (= (ap/sha256-hex (.getBytes "hello" "UTF-8"))
+    (is (= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
            (get-in req [:headers "x-amz-content-sha256"]))
         "the signed content hash must match the actual payload bytes")
     (is (str/starts-with? (get-in req [:headers "Authorization"])
