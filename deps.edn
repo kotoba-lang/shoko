@@ -12,6 +12,11 @@
         {:sha "fdcefb9f1b83461fee54d04b63e374fa301ee847"}
         io.github.kotoba-lang/ipns
         {:sha "f2563eb1cb010c96f6dec1dfbd468fac93367498"}
+        ;; AWS SigV4 (ADR-2607254100). This repo used to carry a JVM port of
+        ;; kotobase.sigv4 because that one was ClojureScript-only and not
+        ;; require-able from the JVM. The shared library is portable .cljc
+        ;; with injected crypto, so the reason for the port is gone.
+        io.github.kotoba-lang/sigv4 {:git/sha "9babf9f29b99f128059515e74b00b19ac9cc5436"}
         ;; shoko does NOT reimplement the file/folder EDN model — it holds
         ;; kotoba-lang/drive content verbatim as draft :content (ADR-2607062020).
         io.github.kotoba-lang/drive
