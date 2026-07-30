@@ -20,7 +20,8 @@
         ;; shoko does NOT reimplement the file/folder EDN model — it holds
         ;; kotoba-lang/drive content verbatim as draft :content (ADR-2607062020).
         io.github.kotoba-lang/drive
-        {:local/root "../drive"}}
+        {:git/url "https://github.com/kotoba-lang/drive.git"
+                                     :git/sha "28faa72174020bf7b8a921d28a66e8efd11e87ca"}}
  :aliases
  {;; offline workspace dev — pin transitive langchain to local checkout
   :dev {:override-deps
