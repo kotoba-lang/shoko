@@ -43,7 +43,7 @@
 ;;   nbb scripts/r2-creds.nbb            ; shell 用 export 行（eval して使う）
 ;;   nbb scripts/r2-creds.nbb --json     ; {"R2_ACCESS_KEY_ID":...,...}
 ;;   eval "$(nbb scripts/r2-creds.bb)"  ; 環境に流し込む
-(require '[clojure.string :as str]
+(require '[kotoba.lang.text :as str]
          ']
          ')
 
