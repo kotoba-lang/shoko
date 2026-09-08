@@ -38,14 +38,14 @@
   Still JVM-only (`#?(:clj ...)`): shoko has no cljs/kototama build target
   today (deps.edn has no shadow-cljs; cli.clj/cacao.clj are already
   .clj-only)."
-  ;; clojure.string/clojure.edn are used ONLY inside the #?(:clj ...) R2/SigV4
+  ;; str/clojure.edn are used ONLY inside the #?(:clj ...) R2/SigV4
   ;; section below (see docstring above) — under a :cljs reading that whole
   ;; section vanishes, so clj-kondo's cljs-side pass would otherwise flag
   ;; these as unused (and a fully-conditional #?(:clj [...]) require, with no
   ;; :cljs branch, makes the :cljs ns's :require empty, which clj-kondo
   ;; rejects outright) — ^:clj-kondo/ignore is the correct scoped escape
   ;; hatch for a require that's genuinely host-specific by design.
-  (:require ^:clj-kondo/ignore [clojure.string :as str]
+  (:require ^:clj-kondo/ignore [kotoba.lang.text :as str]
             ^:clj-kondo/ignore [clojure.edn :as edn]
             ^:clj-kondo/ignore [sigv4.crypto :as sigv4-crypto]
             ^:clj-kondo/ignore [sigv4.request :as sigv4]))
@@ -165,7 +165,7 @@
   ([] (jvm-http-fn {}))
   ([{:keys [timeout-seconds] :or {timeout-seconds 30}}]
    (fn [{:keys [url method headers body]}]
-     (let [sendable-headers (into {} (remove (fn [[k _]] (restricted-headers (str/lower-case k)))) headers)
+     (let [sendable-headers (into {} (remove (fn [[k _]] (restricted-headers (str/lower k)))) headers)
            builder (-> (java.net.http.HttpRequest/newBuilder (java.net.URI/create url))
                        (.timeout (java.time.Duration/ofSeconds timeout-seconds))
                        (as-> b (reduce-kv (fn [b k v] (.header ^java.net.http.HttpRequest$Builder b k v))

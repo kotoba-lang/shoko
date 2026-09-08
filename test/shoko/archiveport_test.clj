@@ -13,7 +13,7 @@
      round-trip against the actual R2 bucket is a separate manual
      verification step (see the ADR/task notes), never part of this suite."
   (:require [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [shoko.archiveport :as ap]
             [sigv4.core :as sigv4-core]
@@ -45,7 +45,7 @@
 (defn- verifies?
   "Recompute the signature the way R2 would."
   [signed key method]
-  (let [headers (into {} (map (fn [[k v]] [(clojure.string/lower-case k) v])) (:headers signed))
+  (let [headers (into {} (map (fn [[k v]] [(str/lower k) v])) (:headers signed))
         parsed (sigv4-verify/parse-authorization (get headers "authorization"))]
     (sigv4-verify/constant-time-eq?
      (:signature parsed)

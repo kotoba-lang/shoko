@@ -33,7 +33,7 @@
   fixed to avoid; store_contract_test's seed-twice test proves this here)."
   (:require #?(:clj  [clojure.edn :as edn]
                :cljs [cljs.reader :as edn])
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [langchain.db :as d]
             [shoko.model :as model]))
 
