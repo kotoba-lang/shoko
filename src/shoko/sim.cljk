@@ -13,7 +13,7 @@
                        act-archive's own repo → HARD HOLD (tenant-isolation)
     phase 0            draft in ingest-only phase → held (phase-disabled)
 
-  Run: clojure -M:dev:run"
+  Run: kbb -M:dev:run"
   (:require [langgraph.graph :as g]
             [shoko.archiveport :as archiveport]
             [shoko.store :as store]

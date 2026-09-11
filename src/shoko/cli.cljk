@@ -4,7 +4,7 @@
   process boundary consumer that needs one file's draft status without an
   in-process require across runtimes.
 
-  Usage: `clojure -M -m shoko.cli <ledger.edn> <file-id>` — prints the draft
+  Usage: `kbb -M -m shoko.cli <ledger.edn> <file-id>` — prints the draft
   status (\"proposed\"/\"none\") and exits 0 on \"proposed\", 1 otherwise (so
   callers can also just check the exit code).
 
