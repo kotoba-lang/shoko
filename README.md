@@ -81,18 +81,18 @@ ledger → swaps to `DatomicStore` with identical results.
 
 | File | Role |
 |---|---|
-| `src/shoko/model.cljc` | pure **draft**/**grant**/**activity** data shapes — `content` is verbatim `kotoba-lang/drive` EDN, never shoko's own representation |
-| `src/shoko/store.cljc` | **Store** protocol — `MemStore` ‖ `DatomicStore` (`langchain.db`, swappable to Datomic Local / kotoba-server) + append-only **storage-governance audit ledger** |
-| `src/shoko/coordllm.cljc` | **archive-LLM Advisor** — `mock-advisor` ‖ `llm-advisor` (`langchain.model`); draft/share proposals |
-| `src/shoko/governor.cljc` | **ArchiveGovernor** — no-actuation · subject-exists (independent/unconditional) · share-requires-acl (deny-by-default) · tenant-isolation · high-stakes |
-| `src/shoko/phase.cljc` | **Phase 0→3** — ingest-only → assisted → assisted-draft → supervised (sharing always human) |
-| `src/shoko/operation.cljc` | **ArchiveActor** — langgraph StateGraph; ingest vs assess flows |
-| `src/shoko/archiveport.cljc` | **ArchiveTarget** port (`fetch-file`/`propose-revision!`/`share!`) + `mock-archiveport` (default, deterministic in-memory + injected Distributor fn) + `r2-archiveport` (JVM-only, opt-in — real Cloudflare R2 backend over R2's S3-compatible API, SigV4-signed plain HTTP, live-verified) |
-| `src/shoko/cacao.clj` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor key) |
-| `src/shoko/kotoba.clj` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
-| `src/shoko/query.cljc` | pure status lookups (`draft-status`/`shared-with?`/`known-principal?`) for callers that don't want to run the actor |
-| `src/shoko/sim.cljc` | demo driver |
-| `src/shoko/cli.clj` | minimal JVM status-check entrypoint |
+| `src/shoko/model.cljk` | pure **draft**/**grant**/**activity** data shapes — `content` is verbatim `kotoba-lang/drive` EDN, never shoko's own representation |
+| `src/shoko/store.cljk` | **Store** protocol — `MemStore` ‖ `DatomicStore` (`langchain.db`, swappable to Datomic Local / kotoba-server) + append-only **storage-governance audit ledger** |
+| `src/shoko/coordllm.cljk` | **archive-LLM Advisor** — `mock-advisor` ‖ `llm-advisor` (`langchain.model`); draft/share proposals |
+| `src/shoko/governor.cljk` | **ArchiveGovernor** — no-actuation · subject-exists (independent/unconditional) · share-requires-acl (deny-by-default) · tenant-isolation · high-stakes |
+| `src/shoko/phase.cljk` | **Phase 0→3** — ingest-only → assisted → assisted-draft → supervised (sharing always human) |
+| `src/shoko/operation.cljk` | **ArchiveActor** — langgraph StateGraph; ingest vs assess flows |
+| `src/shoko/archiveport.cljk` | **ArchiveTarget** port (`fetch-file`/`propose-revision!`/`share!`) + `mock-archiveport` (default, deterministic in-memory + injected Distributor fn) + `r2-archiveport` (JVM-only, opt-in — real Cloudflare R2 backend over R2's S3-compatible API, SigV4-signed plain HTTP, live-verified) |
+| `src/shoko/cacao.cljk` | agent-side **CACAO self-mint** (JVM Ed25519 + did:key + CBOR; per-actor key) |
+| `src/shoko/kotoba.cljk` | wire `DatomicStore` to a kotoba-server pod (kotobase.net XRPC) |
+| `src/shoko/query.cljk` | pure status lookups (`draft-status`/`shared-with?`/`known-principal?`) for callers that don't want to run the actor |
+| `src/shoko/sim.cljk` | demo driver |
+| `src/shoko/cli.cljk` | minimal JVM status-check entrypoint |
 | `test/shoko/*_test.clj` | propose-only contract (happy path + adversarial per hard invariant, incl. a TOCTOU test) · store parity (Mem≡Datomic, incl. a seed-twice-per-id-upsert test) · CACAO |
 
 ## share-requires-acl: what "registered principal" means here
@@ -150,7 +150,7 @@ byte-for-byte identical (`java.util.Arrays/equals`), cleaned up after. The
 SigV4 canonicalization is cross-checked function-for-function against
 `kotobase.sigv4-test`'s golden vectors (gftdcojp/net-kotobase clj-edge, the
 proven cljs implementation this JVM port mirrors). The automated suite
-(`test/shoko/archiveport_test.clj`) covers request-building against an
+(`test/shoko/archiveport_test.cljk`) covers request-building against an
 injected fake `:http-fn` only — no real network/creds in CI.
 
 ```clojure

@@ -27,7 +27,7 @@
 ;; Secret Access Key / Account ID) を解決して出力する。shoko.archiveport/
 ;; r2-archiveport の手動 live 検証専用（自動テスト `clojure -M:dev:test` は
 ;; injected fake :http-fn のみを使い、real credentials/network を一切
-;; 必要としない — see test/shoko/archiveport_test.clj）。
+;; 必要としない — see test/shoko/archiveport_test.cljk）。
 ;;
 ;; 解決順は下記 :order（既定 env→1Password）。cloud-itonami/scripts/
 ;; mail-creds.nbb と同じ形: 参照先（op:// パス）は秘密ではないのでこの
