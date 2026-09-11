@@ -31,7 +31,7 @@
  {;; offline workspace dev — pin transitive langchain to local checkout
   :dev {:override-deps
         {io.github.kotoba-lang/langchain {:local/root "../langchain"}}}
-  ;; clojure -M:dev:run  → drive a file archive/share through one ArchiveActor
+  ;; kbb -M:dev:run  → drive a file archive/share through one ArchiveActor
   :run {:main-opts ["-m" "shoko.sim"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

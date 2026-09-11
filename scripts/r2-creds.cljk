@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; --- nbb shims (auto, ADR-2607173000) ---------------------------------
 (def ^:private __fs (js/require "node:fs"))
 (def ^:private __path (js/require "node:path"))
@@ -25,7 +25,7 @@
 (defn- __json-gen [x & _] (js/JSON.stringify (clj->js x)))
 ;; r2-creds.nbb — Cloudflare R2 S3-compatible credentials (Access Key ID /
 ;; Secret Access Key / Account ID) を解決して出力する。shoko.archiveport/
-;; r2-archiveport の手動 live 検証専用（自動テスト `clojure -M:dev:test` は
+;; r2-archiveport の手動 live 検証専用（自動テスト `kbb -M:dev:test` は
 ;; injected fake :http-fn のみを使い、real credentials/network を一切
 ;; 必要としない — see test/shoko/archiveport_test.cljk）。
 ;;
