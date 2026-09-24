@@ -1,5 +1,5 @@
 (ns shoko.query-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [shoko.query :as query]
             [shoko.store :as store]))
 

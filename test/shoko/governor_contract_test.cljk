@@ -4,7 +4,7 @@
   governor_contract_test. Invariant: the actor never grants access the
   ArchiveGovernor would reject; drafting never auto-actuates; sharing always
   routes to a human regardless of phase."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [shoko.archiveport :as archiveport]
             [shoko.coordllm :as coordllm]
