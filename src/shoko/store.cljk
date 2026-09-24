@@ -31,7 +31,7 @@
   collection — re-seeding with one new id must never wipe out unrelated
   already-seeded entities (the bug class teian.store's MemStore.seed! was
   fixed to avoid; store_contract_test's seed-twice test proves this here)."
-  (:require #?(:clj  [clojure.edn :as edn]
+  (:require #?(:clj  [kotoba.lang.edn :as edn]
                :cljs [cljs.reader :as edn])
             [kotoba.lang.text :as str]
             [langchain.db :as d]
