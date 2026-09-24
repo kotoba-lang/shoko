@@ -14,7 +14,7 @@
      verification step (see the ADR/task notes), never part of this suite."
   (:require [clojure.edn :as edn]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [shoko.archiveport :as ap]
             [sigv4.core :as sigv4-core]
             [sigv4.crypto :as sigv4-crypto]
