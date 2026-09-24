@@ -12,7 +12,7 @@
      method/signed headers) with ZERO real network or credentials. The live
      round-trip against the actual R2 bucket is a separate manual
      verification step (see the ADR/task notes), never part of this suite."
-  (:require [kotoba.lang.edn :as edn]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [shoko.archiveport :as ap]
@@ -77,7 +77,7 @@
   (testing "a PUT with bytes"
     (let [key "files/report.pdf"
           signed (ap/sign-request (assoc signer-opts :method :put :key key
-                                         :payload (.getBytes "hello" "UTF-8")))]
+                                         :payload (kbytes/utf8-bytes "hello")))]
       (is (= "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
              (get (:headers signed) "x-amz-content-sha256")))
       (is (verifies? signed key :put)))))
@@ -103,7 +103,7 @@
 (deftest sign-request-builds-a-path-style-signed-request
   (let [req (ap/sign-request {:method :put :bucket "cloud-itonami-shoko-archive"
                               :key "shoko/f-handbook.edn"
-                              :payload (.getBytes "hello" "UTF-8")
+                              :payload (kbytes/utf8-bytes "hello")
                               :headers {"content-type" "application/edn"}
                               :access-key-id "AKID" :secret-access-key "SECRET"
                               :endpoint-host "acct123.r2.cloudflarestorage.com"
@@ -165,11 +165,11 @@
         (is (= "application/edn" (get-in req [:headers "content-type"])))
         (is (str/starts-with? (get-in req [:headers "Authorization"]) "AWS4-HMAC-SHA256 Credential=AKID/"))
         (is (= {:file-id "f-handbook" :principal "alice" :content content}
-               (edn/read-string (String. ^bytes (:body req) "UTF-8")))
+               (edn/read-string (kbytes/utf8-string ^bytes (:body req))))
             "the PUT body is the exact same record share! returns/hands to the distributor")))))
 
 (deftest share!-throws-on-a-non-2xx-status-and-never-calls-the-distributor
-  (let [{:keys [http-fn]} (stub-http-fn {:status 500 :body (.getBytes "boom" "UTF-8")})
+  (let [{:keys [http-fn]} (stub-http-fn {:status 500 :body (kbytes/utf8-bytes "boom")})
         distributed (atom :untouched)
         target (ap/r2-archiveport {:bucket "b" :account-id "a" :access-key-id "AKID"
                                    :secret-access-key "SECRET" :http-fn http-fn
@@ -179,7 +179,7 @@
 
 (deftest fetch-file-gets-and-decodes-the-stored-record
   (let [stored {:file-id "f-handbook" :principal "alice" :content {:drive/id "f-handbook"}}
-        {:keys [calls http-fn]} (stub-http-fn {:status 200 :body (.getBytes (pr-str stored) "UTF-8")})
+        {:keys [calls http-fn]} (stub-http-fn {:status 200 :body (kbytes/utf8-bytes (pr-str stored))})
         target (ap/r2-archiveport {:bucket "cloud-itonami-shoko-archive" :account-id "acct123"
                                    :access-key-id "AKID" :secret-access-key "SECRET" :http-fn http-fn})]
     (is (= stored (ap/fetch-file target "f-handbook")))
@@ -189,13 +189,13 @@
              (:url req))))))
 
 (deftest fetch-file-returns-nil-on-a-404
-  (let [{:keys [http-fn]} (stub-http-fn {:status 404 :body (.getBytes "<Error/>" "UTF-8")})
+  (let [{:keys [http-fn]} (stub-http-fn {:status 404 :body (kbytes/utf8-bytes "<Error/>")})
         target (ap/r2-archiveport {:bucket "b" :account-id "a" :access-key-id "AKID"
                                    :secret-access-key "SECRET" :http-fn http-fn})]
     (is (nil? (ap/fetch-file target "missing")))))
 
 (deftest fetch-file-throws-on-a-non-404-error-status
-  (let [{:keys [http-fn]} (stub-http-fn {:status 403 :body (.getBytes "<Error/>" "UTF-8")})
+  (let [{:keys [http-fn]} (stub-http-fn {:status 403 :body (kbytes/utf8-bytes "<Error/>")})
         target (ap/r2-archiveport {:bucket "b" :account-id "a" :access-key-id "AKID"
                                    :secret-access-key "SECRET" :http-fn http-fn})]
     (is (thrown? clojure.lang.ExceptionInfo (ap/fetch-file target "f1")))))
