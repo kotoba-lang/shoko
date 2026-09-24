@@ -11,7 +11,7 @@
   <ledger.edn> holds the same shape as `shoko.store/demo-data`'s :files map
   plus an optional :drafts map (at minimum
   {:drafts {\"<file-id>\" {:status :proposed}}})."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [shoko.query :as query]
             [shoko.store :as store]))
 

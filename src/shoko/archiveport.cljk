@@ -46,7 +46,7 @@
   ;; rejects outright) — ^:clj-kondo/ignore is the correct scoped escape
   ;; hatch for a require that's genuinely host-specific by design.
   (:require ^:clj-kondo/ignore [kotoba.lang.text :as str]
-            ^:clj-kondo/ignore [clojure.edn :as edn]
+            ^:clj-kondo/ignore [kotoba.lang.edn :as edn]
             ^:clj-kondo/ignore [sigv4.crypto :as sigv4-crypto]
             ^:clj-kondo/ignore [sigv4.request :as sigv4]))
 

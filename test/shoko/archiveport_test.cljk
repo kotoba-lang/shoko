@@ -12,7 +12,7 @@
      method/signed headers) with ZERO real network or credentials. The live
      round-trip against the actual R2 bucket is a separate manual
      verification step (see the ADR/task notes), never part of this suite."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [shoko.archiveport :as ap]
