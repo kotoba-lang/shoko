@@ -45,7 +45,7 @@
   ;; :cljs branch, makes the :cljs ns's :require empty, which clj-kondo
   ;; rejects outright) — ^:clj-kondo/ignore is the correct scoped escape
   ;; hatch for a require that's genuinely host-specific by design.
-  (:require ^:clj-kondo/ignore [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] ^:clj-kondo/ignore [kotoba.lang.text :as str]
             ^:clj-kondo/ignore [kotoba.lang.edn :as edn]
             ^:clj-kondo/ignore [sigv4.crypto :as sigv4-crypto]
             ^:clj-kondo/ignore [sigv4.request :as sigv4]))
@@ -105,7 +105,7 @@
 (def ^:private signer-crypto (sigv4-crypto/crypto)))
 
 #?(:clj
-(defn- utf8-bytes ^bytes [^String s] (.getBytes s "UTF-8")))
+(defn- utf8-bytes ^bytes [^String s] (kbytes/utf8-bytes s)))
 
 #?(:clj
 (defn sign-request
@@ -233,7 +233,7 @@
         (let [resp (call! {:method :get :key (object-key file-id)})]
           (cond
             (= 404 (:status resp)) nil
-            (< (:status resp) 300) (edn/read-string (String. ^bytes (:body resp) "UTF-8"))
+            (< (:status resp) 300) (edn/read-string (kbytes/utf8-string ^bytes (:body resp)))
             :else (throw (ex-info "R2 GET failed" {:status (:status resp) :file-id file-id})))))
       (propose-revision! [_ file _content] {:branch (str "shoko/" (:drive/id file))})
       (share! [_ file-id principal content]
