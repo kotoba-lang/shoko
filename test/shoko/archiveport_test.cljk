@@ -12,7 +12,7 @@
      method/signed headers) with ZERO real network or credentials. The live
      round-trip against the actual R2 bucket is a separate manual
      verification step (see the ADR/task notes), never part of this suite."
-  (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [shoko.archiveport :as ap]
@@ -174,7 +174,7 @@
         target (ap/r2-archiveport {:bucket "b" :account-id "a" :access-key-id "AKID"
                                    :secret-access-key "SECRET" :http-fn http-fn
                                    :distributor #(reset! distributed %)})]
-    (is (thrown? clojure.lang.ExceptionInfo (ap/share! target "f1" "alice" {:drive/id "f1"})))
+    (is (thrown? kerror/ExceptionInfo (ap/share! target "f1" "alice" {:drive/id "f1"})))
     (is (= :untouched @distributed) "a failed PUT must never reach the distributor")))
 
 (deftest fetch-file-gets-and-decodes-the-stored-record
@@ -198,7 +198,7 @@
   (let [{:keys [http-fn]} (stub-http-fn {:status 403 :body (kbytes/utf8-bytes "<Error/>")})
         target (ap/r2-archiveport {:bucket "b" :account-id "a" :access-key-id "AKID"
                                    :secret-access-key "SECRET" :http-fn http-fn})]
-    (is (thrown? clojure.lang.ExceptionInfo (ap/fetch-file target "f1")))))
+    (is (thrown? kerror/ExceptionInfo (ap/fetch-file target "f1")))))
 
 (deftest propose-revision!-is-pure-no-network-call
   (let [calls (atom 0)
